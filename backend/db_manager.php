@@ -1,6 +1,10 @@
 <?php
 session_start();
 
+ini_set('display_errors', 0);  // 화면에 PHP 오류 출력 안 함
+ini_set('log_errors', 1);       // 오류를 서버 로그에 기록
+error_reporting(E_ALL);         // 모든 오류 로깅
+
 // 로그인 상태 확인
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: index.php');  // 로그인되지 않으면 로그인 페이지로 리디렉션
@@ -38,50 +42,74 @@ if (isset($_GET['db'])) {
 
 // 선택된 테이블의 데이터 가져오기
 $table_data_result = null;
-$sort_column = isset($_GET['sort_column']) ? $_GET['sort_column'] : null;
-$sort_order = isset($_GET['sort_order']) ? $_GET['sort_order'] : 'ASC';
-
 if (isset($_GET['table']) && isset($_GET['db'])) {
     $selected_table = $_GET['table'];
-    $table_data_sql = "SELECT * FROM `$selected_table`";
-    
-    // 쿼리 정렬 추가
-    if ($sort_column) {
-        $table_data_sql .= " ORDER BY `$sort_column` $sort_order";
-    }
-    
+    $table_data_sql = "SELECT * FROM $selected_table"; // 모든 데이터 가져오기
     $table_data_result = $conn->query($table_data_sql);
 }
 
-// 쿼리 실행 후 데이터 수정
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['data'])) {
-    // 수정된 데이터가 있다면
-    $updated_data = $_POST['data'];  // 수정된 데이터
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_SERVER['CONTENT_TYPE']) && strpos($_SERVER['CONTENT_TYPE'], 'application/json') !== false) {
+    // JSON 데이터 읽기
+    $inputData = json_decode(file_get_contents("php://input"), true);
 
-    foreach ($updated_data as $row_id => $columns) {
-        foreach ($columns as $column => $value) {
-            $value = $conn->real_escape_string($value); // 값 escaping
-
-            // 업데이트 쿼리 작성
-            $update_sql = "UPDATE `$selected_table` SET `$column` = '$value' WHERE id = '$row_id'";
-
-            if (!$conn->query($update_sql)) {
-                echo "쿼리 오류: " . $conn->error;
-            }
-        }
+    // 데이터를 올바르게 파싱했는지 확인
+    if ($inputData === null) {
+        echo json_encode(["success" => false, "error" => "잘못된 JSON 형식입니다."]);
+        exit();
     }
 
-    // 업데이트 후 페이지 새로고침
-    header("Location: db_manager.php?db=$selected_db&table=$selected_table");
-    exit();
+    // 확인: 파싱된 데이터가 제대로 들어왔는지 로그로 확인
+    error_log(json_encode($inputData)); // 여기서 로그 확인
+
+    if (isset($inputData['table_name']) && isset($inputData['changedData'])) {
+        $table_name = $inputData['table_name'];  // 테이블 이름
+        $changedData = $inputData['changedData'];  // 수정된 데이터
+
+        if (empty($changedData)) {
+            echo json_encode(["success" => false, "error" => "변경된 데이터가 없습니다."]);
+            exit();
+        }
+
+        // 데이터베이스에서 데이터 업데이트
+        foreach ($changedData as $data) {
+            $id = $data['id'];  // 행의 ID
+            $column = $data['column'];  // 수정된 컬럼
+            $value = $data['value'];  // 수정된 값
+
+            // SQL 쿼리로 데이터 업데이트
+            $sql = "UPDATE $table_name SET $column = ? WHERE id = ?";
+            $stmt = $conn->prepare($sql);
+            
+            // 값 바인딩 확인
+            if ($stmt === false) {
+                echo json_encode(["success" => false, "error" => "SQL prepare failed: " . $conn->error]);
+                exit();
+            }
+
+            // 파라미터 바인딩 (예: 문자열 값과 정수값 바인딩)
+            $stmt->bind_param("si", $value, $id);
+
+            if (!$stmt->execute()) {
+                echo json_encode(["success" => false, "error" => $conn->error]);
+                exit();
+            }
+        }
+
+        // 변경 사항 반영 후에 다시 조회해서 확인하기
+        $select_sql = "SELECT * FROM $table_name";
+        $select_result = $conn->query($select_sql);
+        $rows = [];
+        while ($row = $select_result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+
+        echo json_encode(["success" => true, "data" => $rows]);
+    } else {
+        echo json_encode(["success" => false, "error" => "필요한 데이터가 없습니다."]);
+    }
 }
 
 
-// 페이지 로딩 시 메시지 표시
-if (isset($_SESSION['message'])) {
-    echo "<div class='message'>" . $_SESSION['message'] . "</div>";
-    unset($_SESSION['message']);  // 메시지 출력 후 삭제
-}
 
 
 // 쿼리 실행 처리
@@ -104,6 +132,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['query'])) {
 
 $conn->close();
 ?>
+
+
 
 <!DOCTYPE html>
 <html lang="ko">
@@ -167,7 +197,7 @@ $conn->close();
             margin-left: 30px;
             padding: 10px;
             flex-grow: 1;
-            max-width: 100%;
+            max-width: 50%;
             height: 80vh;
             overflow-y: auto;  /* 세로 스크롤 */
             overflow-x: visible; /* 가로 스크롤 영역 밖으로 뺀다 */
@@ -281,19 +311,15 @@ $conn->close();
             <?php if (isset($table_data_result) && $table_data_result->num_rows > 0): ?>
                 <h3>테이블: <?php echo htmlspecialchars($selected_table); ?></h3>
                 <input type="text" id="search" onkeyup="searchTable()" placeholder="검색..." />
-                <form method="POST">
+                <form id="dataForm">
                     <input type="hidden" name="table_name" value="<?php echo htmlspecialchars($selected_table); ?>" />
-                    <button type="submit" id="saveChangesButton" class="save-button">변경사항 저장</button>
+                    <button type="button" id="saveChangesButton" class="save-button">변경사항 저장</button>
                     <div class="table-data">
                         <table>
                             <thead>
                                 <tr>
                                     <?php while ($field_info = $table_data_result->fetch_field()): ?>
-                                        <th>
-                                            <a href="?db=<?php echo urlencode($selected_db); ?>&table=<?php echo urlencode($selected_table); ?>&sort_column=<?php echo urlencode($field_info->name); ?>&sort_order=<?php echo $sort_order === 'ASC' ? 'DESC' : 'ASC'; ?>">
-                                                <?php echo htmlspecialchars($field_info->name); ?>
-                                            </a>
-                                        </th>
+                                        <th><?php echo htmlspecialchars($field_info->name); ?></th>
                                     <?php endwhile; ?>
                                 </tr>
                             </thead>
@@ -301,7 +327,7 @@ $conn->close();
                                 <?php while ($row = $table_data_result->fetch_assoc()): ?>
                                     <tr>
                                         <?php foreach ($row as $column => $value): ?>
-                                            <td contenteditable="true" name="data[<?php echo $row['id']; ?>][<?php echo $column; ?>]" data-id="<?php echo $row['id']; ?>">
+                                            <td contenteditable="true" name="data[<?php echo $row['id']; ?>][<?php echo $column; ?>]" data-id="<?php echo $row['id']; ?>" data-column="<?php echo $column; ?>">
                                                 <?php echo htmlspecialchars($value); ?>
                                             </td>
                                         <?php endforeach; ?>
@@ -311,7 +337,6 @@ $conn->close();
                         </table>
                     </div>
                 </form>
-
             <?php else: ?>
                 <p>테이블 데이터가 없습니다.</p>
             <?php endif; ?>
@@ -319,7 +344,7 @@ $conn->close();
 
         <div id="query-section">
             <form method="POST">
-                <textarea name="query" placeholder="SQL 쿼리를 입력하세요"><?php echo isset($_POST['query']) ? htmlspecialchars($_POST['query']) : ''; ?></textarea><br>
+                <textarea name="query" placeholder="SQL 쿼리를 입력하세요"></textarea><br>
                 <button type="submit">쿼리 실행</button>
             </form>
 
@@ -329,7 +354,6 @@ $conn->close();
                     if (is_string($query_result)) {
                         echo $query_result;
                     } else {
-                        echo "<form method='POST' id='queryResultForm'>";
                         echo "<table><tr>";
                         $fields = $query_result->fetch_fields();
                         foreach ($fields as $field) {
@@ -337,61 +361,103 @@ $conn->close();
                         }
                         echo "</tr>";
 
-                        $row_id = 1; // 각 행에 대한 고유 ID (예시로 사용)
-
-                        while ($row = $query_result->fetch_assoc()) {
-                            echo "<tr>";
-                            foreach ($row as $col => $val) {
-                                echo "<td contenteditable='true' name='data[$row_id][$col]' data-id='$row_id'>" . htmlspecialchars($val) . "</td>";
-                            }
-                            echo "</tr>";
-                            $row_id++;
-                        }
-                        echo "</table>";
-                        echo "<button type='submit' id='saveQueryResultButton' class='save-button'>변경사항 저장</button>";
-                        echo "</form>";
-                    }
+                         while ($row = $query_result->fetch_assoc()) {
+            echo "<tr>";
+            foreach ($row as $col => $val) {
+                if (isset($row['id'])) {
+                    echo "<td contenteditable='true' data-column='$col' data-id='{$row['id']}'>" . htmlspecialchars($val) . "</td>";
+                } else {
+                    echo "<td contenteditable='true' data-column='$col'>" . htmlspecialchars($val) . "</td>";
                 }
+            }
+            echo "</tr>";
+        }
+        echo "</table>";
+    }
+}
+                echo "<button onclick='saveQueryResults()' class='save-button' style='margin-top: 10px;'>변경사항 저장</button>";
                 ?>
             </div>
-
         </div>
     </div>
 
     <script>
-        function toggleTables(db) {
-        // 테이블 목록을 항상 열어두기 위해 style을 변경하지 않음
-        const tableList = document.getElementById('tables-' + db);
-        tableList.style.display = 'block';  // 항상 테이블 목록을 보이게 설정
+        document.addEventListener("DOMContentLoaded", function () {
+            // 페이지 로딩 시 URL에서 DB와 Table 파라미터 가져오기
+            const urlParams = new URLSearchParams(window.location.search);
+            const selectedDb = urlParams.get('db');
+            const selectedTable = urlParams.get('table');
 
-        // 모든 DB 항목에서 active 클래스를 제거하고, 클릭된 DB에만 active 클래스를 추가
-        const dbItems = document.querySelectorAll('.db-item');
-        dbItems.forEach(item => {
-            item.classList.remove('active');
+            // URL에 있는 DB 값에 맞는 DB 목록에 'active' 클래스 추가
+            if (selectedDb) {
+                const selectedDbItem = document.getElementById('db-' + selectedDb);
+                if (selectedDbItem) {
+                    selectedDbItem.classList.add('active');
+                }
+
+                // 해당 DB의 테이블 목록 보이기
+                const tableList = document.getElementById('tables-' + selectedDb);
+                if (tableList) {
+                    tableList.style.display = 'block';  // 선택된 DB의 테이블 목록이 계속 보이도록 설정
+                }
+            }
+
+            // URL에 있는 테이블 값에 맞는 테이블 선택 표시
+            if (selectedTable) {
+                const selectedTableItem = document.getElementById('table-' + selectedTable);
+                if (selectedTableItem) {
+                    selectedTableItem.classList.add('active');
+                }
+            }
         });
 
-        // 클릭된 DB 항목에만 active 클래스를 추가
-        const selectedDbItem = document.getElementById('db-' + db);
-        if (selectedDbItem) {
-            selectedDbItem.classList.add('active');
-        }
-    }
+        function toggleTables(db) {
+            console.log("toggleTables called for: " + db);
 
-    // 페이지가 로드될 때 URL에 db 파라미터가 있으면 해당 DB의 테이블 목록을 열어줌
-    document.addEventListener("DOMContentLoaded", function () {
-        const urlParams = new URLSearchParams(window.location.search);
-        const db = urlParams.get('db');
-        if (db) {
-            toggleTables(db);
-        }
-    });
+            // 선택된 데이터베이스를 localStorage에 저장 (새로고침해도 유지)
+            localStorage.setItem("selectedDB", db);
+            localStorage.removeItem("selectedTable"); // DB 변경 시 기존 테이블 선택 해제
 
+            // 모든 데이터베이스 리스트에서 'active' 제거
+            document.querySelectorAll('.db-item').forEach(item => item.classList.remove('active'));
+
+            // 선택한 데이터베이스에 'active' 클래스 추가
+            const selectedDbItem = document.getElementById('db-' + db);
+            if (selectedDbItem) {
+                selectedDbItem.classList.add('active');
+            }
+
+            
+            // 선택한 데이터베이스의 테이블 목록 표시
+            const tableList = document.getElementById('tables-' + db);
+            if (tableList) {
+                tableList.style.display = 'block'; // 선택된 DB의 테이블 목록은 계속 보이도록 유지
+            }
+
+            // 선택한 데이터베이스가 URL에 반영되도록 변경
+            const urlParams = new URLSearchParams(window.location.search);
+            urlParams.set('db', db); // 선택한 DB를 URL에 추가
+            
+            // 페이지를 새로고침하지 않고 URL을 변경하는 방법
+            window.history.pushState({}, '', `${window.location.pathname}?${urlParams.toString()}`);
+        }
 
 
         function loadTableData(db, table) {
-            window.location.href = '?db=' + db + '&table=' + table;
+            console.log(`Loading table: ${table} from DB: ${db}`);
+
+            // 선택한 테이블을 localStorage에 저장 (새로고침해도 유지)
+            localStorage.setItem("selectedTable", table);
+
+            // URL 업데이트 (DB + Table 선택 시)
+            const urlParams = new URLSearchParams(window.location.search);
+            urlParams.set('db', db);
+            urlParams.set('table', table);
+            window.location.search = urlParams.toString();
         }
 
+        
+        
         function searchTable() {
             const input = document.getElementById('search');
             const filter = input.value.toUpperCase();
@@ -411,49 +477,87 @@ $conn->close();
         }
 
         document.addEventListener("DOMContentLoaded", function () {
-            let changesMade = false;  // 변경사항이 있는지 확인하는 변수
+            let changesMade = false;
+            let modifiedData = [];
 
-            // 모든 수정 가능한 셀에 이벤트 리스너 추가
-            document.querySelectorAll("td[contenteditable=true]").forEach(td => {
-                td.addEventListener("input", function () {
-                    let id = td.getAttribute("data-id");
-                    let name = td.getAttribute("name");
-                    let value = td.innerText.trim();
+            document.querySelectorAll('td[contenteditable="true"]').forEach(cell => {
+                cell.addEventListener('focus', function () {
+                    this.dataset.originalValue = this.textContent.trim();
+                });
 
-                    let hiddenInput = document.querySelector(`input[name="${name}"]`);
-                    if (!hiddenInput) {
-                        hiddenInput = document.createElement("input");
-                        hiddenInput.type = "hidden";
-                        hiddenInput.name = name;
-                        td.closest("form").appendChild(hiddenInput);
+                cell.addEventListener('input', function () {
+                    const newValue = this.textContent.trim();
+                    const originalValue = this.dataset.originalValue;
+                    const rowId = this.dataset.id;
+                    const columnName = this.dataset.column;
+
+                    if (!rowId || !columnName) return;
+
+                    // 변경 사항이 있을 경우만 저장
+                    if (newValue !== originalValue) {
+                        changesMade = true;
+
+                        // 기존 데이터가 있으면 업데이트
+                        const existingIndex = modifiedData.findIndex(item => item.id === rowId && item.column === columnName);
+                        if (existingIndex > -1) {
+                            modifiedData[existingIndex].value = newValue;
+                        } else {
+                            modifiedData.push({ id: rowId, column: columnName, value: newValue });
+                        }
                     }
-                    hiddenInput.value = value;
-
-                    // 변경사항이 발생했음을 기록
-                    changesMade = true;
                 });
             });
 
-            const saveButton = document.getElementById("saveQueryResultButton");
+            document.getElementById("saveChangesButton")?.addEventListener("click", function (event) {
+                event.preventDefault();
+                if (!changesMade) {
+                    alert("변경된 내용이 없습니다.");
+                    return;
+                }
 
-            if (saveButton) {
-                saveButton.addEventListener("click", function (event) {
-                    event.preventDefault();  // 기본 폼 제출을 방지
+                if (confirm("변경사항을 저장하시겠습니까?")) {
+                    updateDatabase(modifiedData);
+                }
+            });
 
-                    // 변경사항이 있는 경우에만 알림창을 띄움
-                    if (changesMade) {
-                        const confirmation = confirm("변경사항을 저장하시겠습니까?");
-                        if (confirmation) {
-                            // 사용자가 확인을 누르면 폼 제출
-                            document.querySelector("form").submit();
-                        }
+            function updateDatabase(modifiedData) {
+                const tableName = getCurrentTable();
+                if (!tableName) {
+                    alert("테이블 이름을 찾을 수 없습니다.");
+                    return;
+                }
+
+                const data = {
+                    table_name: tableName,
+                    changedData: modifiedData
+                };
+
+                fetch("db_manager.php", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(data)
+                })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success) {
+                        alert("변경사항이 MariaDB에 반영되었습니다.");
+                        location.reload(); // 저장 후 새로고침
                     } else {
-                        // 변경사항이 없으면 바로 폼 제출
-                        document.querySelector("form").submit();
+                        alert("변경사항 반영 실패: " + (result.error || "알 수 없는 오류"));
                     }
+                })
+                .catch(error => {
+                    console.error("Error:", error);
+                    alert("서버에 문제가 발생했습니다.");
                 });
             }
         });
+
+
+
+
 
 
     </script>
