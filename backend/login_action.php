@@ -20,7 +20,7 @@ if ($username === $valid_username && password_verify($password, $hashed_password
     // 로그인 성공 시 세션 저장
     $_SESSION['logged_in'] = true;
     session_regenerate_id(true);  // 세션 ID 재생성 (세션 하이재킹 방지)
-    header('Location: db_manager.php');  // 로그인 후 DB 관리 페이지로 리디렉션
+    header('Location: ../frontend/db_manager.html');  // 로그인 후 DB 관리 페이지로 리디렉션
     exit();
 } else {
     // 로그인 실패 시 에러 메시지 출력
