@@ -1,0 +1,36 @@
+/* button.css */
+.query-page-btn {
+    padding: 10px 15px;
+    margin: 0 5px;
+    border: 1px solid #ccc;
+    background-color: #f8f9fa;
+    cursor: pointer;
+    font-size: 14px;
+    border-radius: 4px;
+}
+
+.query-page-btn.active {
+    background-color: #ff0800; /* 활성화된 버튼 색상 */
+    color: white;
+}
+
+.query-page-btn:hover {
+    background-color: #ddd;
+}
+
+
+.pagination a {
+    padding: 8px 12px;
+    margin: 2px;
+    text-decoration: none;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    color: black;
+}
+.pagination a.active {
+    background-color: #007bff;
+    color: white;
+    font-weight: bold;
+}
+
+
